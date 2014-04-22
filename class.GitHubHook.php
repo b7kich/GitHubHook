@@ -1,95 +1,113 @@
 <?php
-error_reporting(0);
+
+namespace FDMIT\GitHubHook;
+
 
 /**
- * GitHub Post-Receive Deployment Hook.
- *
- * @author Chin Lee <kwangchin@gmail.com>
- * @copyright Copyright (C) 2012 Chin Lee
- * @license http://www.opensource.org/licenses/mit-license.php The MIT License
- * @version 1.0
- */
+* GitHub Post-Receive Deployment Hook.
+*
+* @license http://www.opensource.org/licenses/mit-license.php The MIT License
+*/
 
 class GitHubHook
 {
-  /**
-   * @var string Remote IP of the person.
-   * @since 1.0
-   */
-  private $_remoteIp = '';
+ 
+	/**
+	* @var boolean show error messages if set, default off.
+	*/
+  private $debug = FALSE;
 
-  /**
-   * @var object Payload from GitHub.
-   * @since 1.0
-   */
-  private $_payload = '';
+/**
+* @var array list of allowed caller IP ranges (CIDR notation), defaulting to GitHub's public IP addresses. Whitelist all callers with '0.0.0.0/0'.
+*/
+  private $allowedIpRanges = array('192.30.252.0/22');  
 
+/**
+* @var array list of allowed events per the X-GitHub-Event header, defaults to ['push', 'ping'] 
+*/
+  
+  private $allowedEvents = array('push','ping'); 
+  
   /**
-   * @var boolean Log debug messages.
-   * @since 1.0
+   * Empty template method to override defaults etc. 
    */
-  private $_debug = FALSE;
-
-  /**
-   * @var array Branches.
-   * @since 1.0
-   */
-  private $_branches = array();
-
-  /**
-   * @var array GitHub's public IP addresses for hooks (CIDR notation).
-   */
-  private $_github_public_cidrs = array('192.30.252.0/22');
-
-  /**
-   * Constructor.
-   * @since 1.0
-   */
-  function __construct() {
-    /* Support for EC2 load balancers */
-    if (
-        isset($_SERVER['HTTP_X_FORWARDED_FOR']) &&
-        filter_var($_SERVER['HTTP_X_FORWARDED_FOR'], FILTER_VALIDATE_IP)
-      ) {
-      $this->_remoteIp = $_SERVER['HTTP_X_FORWARDED_FOR'];
-    } else {
-      $this->_remoteIp = $_SERVER['REMOTE_ADDR'];
-    }
-
-    if (isset($_POST['payload'])) {
-      $this->_payload  = json_decode($_POST['payload']);
-    } else {
-      $this->_notFound('Payload not available from: ' . $this->_remoteIp);
-    }
+  public function __construct() {
+  
   }
-
-  /**
-   * Centralize our 404.
-   * @param string $reason Reason of 404 Not Found.
-   * @since 1.1
-   */
-  private function _notFound($reason = NULL) {
-    if ($reason !== NULL) {
-      $this->log($reason);
-    }
+  
+   /**
+	* Show error response, defaults to 404 Not Found to avoid undue interest. 
+	* @param string $message short error reason
+	* @return boolean FALSE to indicate error condition;
+	*/
+  private function error($message = NULL) {
+    
+    if ($message !== NULL) 
+      $this->log($message);
 
     header('HTTP/1.1 404 Not Found');
     echo '404 Not Found.';
-    exit;
+
+	if ($this->debug)
+		echo ' '. htmlentities($message); 
+    
+	return false; 
+  }
+
+/**
+* Log a message.
+* @param string $message Message to log.
+*/
+  private function log($message) {
+    if (!$this->debug) 
+		return;
+		
+	$safeMessage=filter_var( $message, FILTER_SANITIZE_STRING,
+	   FILTER_FLAG_STRIP_LOW | FILTER_FLAG_STRIP_HIGH); 
+	   
+	trigger_error( $safeMessage, E_USER_ERROR);
   }
 
   /**
-   * IP in CIDRs Match - checks whether an IP exists within an array of CIDR ranges.
-   * @link - http://stackoverflow.com/questions/10243594/find-whether-a-given-ip-exists-in-cidr-or-not?lq=1
-   * @param string $ip - IP address in '127.0.0.1' format
-   * @param array $cidrs - array storing CIDRS in 192.168.1.20/27 format.
-   * @return bool
+* Enable output of error messages.
+* @param boolean $on flag, defaults to true 
+*/
+  public function setDebug($on=TRUE) {
+    $this->debug = $on;
+  }
+
+  /**
+   * Get caller IP with support for proxies like the EC2 load balancers.
+   * @return string IP4 address   
    */
-  private function ip_in_cidrs($ip, $cidrs) {
+  private function getRemoteIp() {
+	
+	if (isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+		$sanitizer='/^([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})? *,?.*$/'; 
+		$forwardedFor=preg_replace($sanitizer,'\1',$_SERVER['HTTP_X_FORWARDED_FOR']);
+		
+		if (filter_var($forwardedFor, FILTER_VALIDATE_IP))
+			return $forwardedFor;
+	}
+
+	return $_SERVER['REMOTE_ADDR']; 
+  }
+  
+/**
+* IP in CIDRs Match - checks whether an IP exists within an array of CIDR ranges.
+* @link - http://stackoverflow.com/questions/10243594/find-whether-a-given-ip-exists-in-cidr-or-not?lq=1
+* @param string $ip - IP address in '127.0.0.1' format
+* @param array $cidrs - array storing CIDRS in 192.168.1.20/27 format.
+* @return bool
+*/
+  private function ipInCidrs($ip, $cidrs) {
+    if (!$ip) 
+		return FALSE; 
+	
 	$ipu = explode('.', $ip);
 
 	foreach ($ipu as &$v) {
-		$v = str_pad(decbin($v), 8, '0', STR_PAD_LEFT);
+	$v = str_pad(decbin($v), 8, '0', STR_PAD_LEFT);
 	}
 
 	$ipu = join('', $ipu);
@@ -112,76 +130,85 @@ class GitHubHook
   }
 
   /**
-   * Enable log of debug messages.
-   * @since 1.0
+   * Validate the request. 
+   * @return GitHubEvent event with JSON-decoded request payload (as arrays) or FALSE on error. 
    */
-  public function enableDebug() {
-    $this->_debug = TRUE;
-  }
+  private function validate() {
+  
+    if (!$this->ipInCidrs($this->getRemoteIp(), $this->allowedIpRanges))
+		return $this->error('Not allowed from IP: '.$this->getRemoteIp()); 
+	
+	if (!isset($_SERVER['HTTP_X_GITHUB_DELIVERY']))
+		return $this->error('Missing X-GitHub-Delivery.'); 
+		
+	$delivery = filter_var( $_SERVER['HTTP_X_GITHUB_DELIVERY'], FILTER_SANITIZE_STRING,
+	   FILTER_FLAG_STRIP_LOW | FILTER_FLAG_STRIP_HIGH); 
+		
+	if (!isset($_SERVER['HTTP_X_GITHUB_EVENT'])) 
+		return $this->error('Missing X-GitHub-Event.'); 
+		
+	$type = filter_var( $_SERVER['HTTP_X_GITHUB_EVENT'], FILTER_SANITIZE_STRING,
+	   FILTER_FLAG_STRIP_LOW | FILTER_FLAG_STRIP_HIGH); 
+	
+	if (!in_array($type, $this->allowedEvents)) 
+		return $this->error('Unacceptable event type: '. $event->type); 
+	
+	if (!isset($_POST['payload'])) 
+		return $this->error('Payload missing.');
 
-  /**
-   * Add a branch.
-   * @param string $name Branch name, defaults to 'master'.
-   * @param string $title Branch title, defaults to 'development'.
-   * @param string $path Relative path to development directory, defaults to '/var/www/'.
-   * @param array $author Contains authorized users' email addresses, defaults to everyone.
-   * @since 1.0
-   */
-  public function addBranch($name = 'master', $title = 'development', $path = '/var/www/', $author = array()) {
-    $this->_branches[] = array(
-      'name'   => $name,
-      'title'  => $title,
-      'path'   => $path,
-      'author' => $author
-    );
-  }
+	$payload = json_decode($_POST['payload'], false, 512, JSON_BIGINT_AS_STRING);
 
-  /**
-   * Handle error (defaults to trigger E_USER_ERROR);
-   * @param string $message Message to log.
-   * @since 1.0
-   */
-  public function error($code,$message) {
-    if ($this->_debug) {
-      trigger_error($message,E_USER_ERROR);
-     }
-  }
+	if (NULL===$payload)
+		return $this->error('Broken payload format.');
+		
+	// TODO implement X-Hub-Signature checking
 
-  /**
-   * Log a message.
-   * @param string $message Message to log.
-   * @since 1.0
-   */
-  public function log($message) {
-    if ($this->_debug) {
-       error_log($message);
-     }
-  }
+	$event = new GitHubEvent();
+	$event->delivery=$delivery;
+	$event->type=$type;
+	$event->payload=$payload; 
+	
+	return $event; 			
+  } 
+  
+  
+ 	/**
+	* Handle HTTP request and output error if invalid.
+	* @return boolean true on success, false on error
+	*/
+	  public function handle() {
+		if (!$event=$this->validate())
+			return false; 
+			
+		// process event
+		
+		return true; 
 
-  /**
-   * Deploys.
-   * @since 1.0
-   */
-  public function deploy() {
-	// Check the remote is a whitelisted GitHub public ip.
-    if ($this->ip_in_cidrs($this->_remoteIp, $this->_github_public_cidrs)) {
-      foreach ($this->_branches as $branch) {
-        if ($this->_payload->ref == 'refs/heads/' . $branch['name']) {
-          $this->log('Deploying to ' . $branch['title'] . ' server');
-	  $output=array(); 
-	  $exit=0;
-	  $cmd='git pull --git-dir='. escapeshellarg($branch['path']) .' options '. escapeshellarg($branch['name']); 
-          exec($cmd,$output,$exit);
-	  $msg="\t" . join(PHP_EOL . "\t", $output);
-	  if (0!=$exit)
-	    $this->error("error($exit): " . $branch['path'] . '$ ' . $cmd . PHP_EOL . $msg);
-	  else
-	    $this->log(msg); 
-        }
-      }
-    } else {
-	  // IP of remote is invalid.
-      $this->_notFound('IP address not recognized: ' . $this->_remoteIp);
-    }
-  }
-}
+	 }
+	  
+ }
+
+/**
+ * Stupid event data object.
+ */
+class GitHubEvent {
+
+	/**
+	 * @var string event type per X-GitHub-Event header, e.g. 'push' or 'ping'.
+	 */ 
+	public $type;
+	
+	/**
+	 * @var string event delivery (globally unique id) per X-GitHub-Delivery header
+	 */ 
+
+	public $delivery;
+	
+	/**
+	 * @var array JSON-decoded event payload (as nested arrays). 
+	 */
+	
+	public $payload;
+
+ }
+ 
